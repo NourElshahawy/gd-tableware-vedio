@@ -35,6 +35,13 @@ OUTPUT = ROOT.parent / "output"
 DEFAULT_LOGO = ROOT / "assets" / "original" / "GD_logo_official_59x48.jpg"
 
 FPS, DURATION = TL.FPS, TL.DURATION
+SS = 2                    # internal supersampling factor (render 2x, Lanczos down)
+MAX_ONSCREEN_SCALE = 1.0  # never show a photo above 100% of its source pixels
+
+
+def px(v):
+    """A fixed pixel distance expressed at final resolution -> internal pixels."""
+    return v * SS
 NFRAMES = int(round(FPS * DURATION))
 
 BLACK = np.array([8, 8, 8], np.float32) / 255        # #080808
@@ -81,29 +88,21 @@ def fade_window(t, a, b, fin=0.4, fout=0.3):
 
 # ----------------------------------------------------------------- assets --
 class Asset:
-    """Premultiplied float RGBA with a small mip chain for clean downscaling."""
+    """Premultiplied float RGBA at the cutout's original pixel resolution.
+
+    No pre-scaled copies are kept: every frame resamples this original once.
+    """
 
     def __init__(self, path):
         im = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         rgba = cv2.cvtColor(im, cv2.COLOR_BGRA2RGBA).astype(np.float32) / 255
         rgba[..., :3] *= rgba[..., 3:4]
         self.h, self.w = rgba.shape[:2]
-        self.levels = [rgba]
-        f = 1.0
-        while f > 0.15:
-            f *= 0.7
-            self.levels.append(cv2.resize(rgba, (max(2, round(self.w * f)), max(2, round(self.h * f))),
-                                          interpolation=cv2.INTER_AREA))
-
-    def level(self, scale):
-        best = self.levels[0]
-        for arr in self.levels:
-            if arr.shape[1] / self.w >= scale * 0.98:
-                best = arr
-        return best
+        self.src = rgba
 
 
 ASSETS = {}
+OVERSCALE_WARNED = set()
 
 
 def asset(key):
@@ -113,18 +112,21 @@ def asset(key):
 
 
 def warp(a, scale, cx, cy, W, H):
-    arr = a.level(scale)
-    lf = arr.shape[1] / a.w
+    """One Lanczos resample of the original (anti-alias pre-blur when shrinking)."""
+    arr = a.src
+    if scale < 0.999:
+        sigma = 0.5 * math.sqrt(1.0 / (scale * scale) - 1.0)
+        arr = cv2.GaussianBlur(arr, (0, 0), sigma)
     sw, sh = a.w * scale, a.h * scale
     x0, y0 = cx - sw / 2, cy - sh / 2
     ix0, iy0 = max(0, math.floor(x0)), max(0, math.floor(y0))
     ix1, iy1 = min(W, math.ceil(x0 + sw)), min(H, math.ceil(y0 + sh))
     if ix1 - ix0 < 2 or iy1 - iy0 < 2:
         return None
-    s = scale / lf
+    s = scale
     M = np.float32([[s, 0, x0 - ix0 + 0.5 * s - 0.5], [0, s, y0 - iy0 + 0.5 * s - 0.5]])
     P = cv2.warpAffine(arr, M, (ix1 - ix0, iy1 - iy0),
-                       flags=cv2.INTER_CUBIC if s > 1.0 else cv2.INTER_LINEAR,
+                       flags=cv2.INTER_LANCZOS4,
                        borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
     P[..., 3] = np.clip(P[..., 3], 0, 1)
     P[..., :3] = np.clip(P[..., :3], 0, P[..., 3:4])
@@ -160,6 +162,13 @@ def draw_product(canvas, key, cx, cy, width, *, expo=1.0, light=(-0.55, -0.8), a
     H, W = canvas.shape[:2]
     a_ = asset(key)
     scale = width / a_.w
+    if scale / SS > MAX_ONSCREEN_SCALE + 1e-3:
+        if key not in OVERSCALE_WARNED:
+            OVERSCALE_WARNED.add(key)
+            print(f"WARNING: {key} requested at {scale / SS:.2f}x source; clamped to {MAX_ONSCREEN_SCALE:.2f}x",
+                  file=sys.stderr, flush=True)
+        scale = MAX_ONSCREEN_SCALE * SS
+        width = scale * a_.w
     r = warp(a_, scale, cx, cy, W, H)
     if r is None:
         return
@@ -184,11 +193,11 @@ def draw_product(canvas, key, cx, cy, width, *, expo=1.0, light=(-0.55, -0.8), a
         rgb = rgb + (band * strength)[..., None] * a * WARM_SPEC
 
     if rim > 0:
-        px = max(1.5, width / 260)
-        M = np.float32([[1, 0, -lx * px], [0, 1, -ly * px]])
+        rim_px = max(1.5, width / 260)
+        M = np.float32([[1, 0, -lx * rim_px], [0, 1, -ly * rim_px]])
         shifted = cv2.warpAffine(a[..., 0], M, (w, h), borderMode=cv2.BORDER_CONSTANT)
         edge = np.clip(a[..., 0] - shifted, 0, 1)
-        edge = cv2.GaussianBlur(edge, (0, 0), max(0.8, px * 0.5))
+        edge = cv2.GaussianBlur(edge, (0, 0), max(0.8, rim_px * 0.5))
         rgb = rgb + (edge * rim)[..., None] * COOL_RIM
 
     if blur > 0:
@@ -206,8 +215,8 @@ def draw_product(canvas, key, cx, cy, width, *, expo=1.0, light=(-0.55, -0.8), a
         Ra = a[::-1]
         dist = (rows - yb).astype(np.float32)
         g = reflect * np.clip(1 - dist / (0.32 * sh), 0, 1) ** 2
-        R = cv2.GaussianBlur(R * g[:, None, None], (0, 0), 1.6)
-        Ra = cv2.GaussianBlur(Ra[..., 0] * g[:, None], (0, 0), 1.6)[..., None]
+        R = cv2.GaussianBlur(R * g[:, None, None], (0, 0), px(1.6))
+        Ra = cv2.GaussianBlur(Ra[..., 0] * g[:, None], (0, 0), px(1.6))[..., None]
         comp(canvas, R * opacity, Ra * opacity, ix0, int(rows[0]))
     comp(canvas, rgb, a, ix0, iy0, opacity)
 
@@ -290,7 +299,7 @@ def draw_rule(canvas, cx, y, length, thick, color, opacity=1.0, glow=0.0, anchor
     iy0, iy1 = int(y - thick / 2), int(math.ceil(y + thick / 2))
     canvas[iy0:iy1, ix0:ix1] = canvas[iy0:iy1, ix0:ix1] * (1 - opacity) + color * opacity
     if glow > 0:
-        draw_glow(canvas, (x0 + x1) / 2, y, max(8, (x1 - x0) * 0.55), thick * 6, glow, color)
+        draw_glow(canvas, (x0 + x1) / 2, y, max(px(8), (x1 - x0) * 0.55), thick * 6, glow, color)
 
 
 # ------------------------------------------------------------------- logo --
@@ -300,6 +309,7 @@ LOGO_CARD = {}
 def logo_card(logo_path, logo_h):
     """The official logo on a premium white card (its black wordmark needs a
     light field). Upscaled with Lanczos only - geometry is untouched."""
+    logo_h = int(round(logo_h))
     k = (str(logo_path), logo_h)
     if k in LOGO_CARD:
         return LOGO_CARD[k]
@@ -327,8 +337,9 @@ def logo_card(logo_path, logo_h):
 DESKTOP = dict(
     name="desktop", W=1300, H=500, file="GD_Tableware_RS3000_Desktop_1300x500.mp4",
     poster="GD_Tableware_RS3000_Desktop_Poster.jpg", poster_t=15.2, grain=0.016,
+    maxrate="12M", bufsize="24M",
     s1=dict(cx=650, cy=238, w=640),
-    s2=dict(panel=(860, 250), fade=(430, 660), scale=1.55, side="left",
+    s2=dict(panel=(860, 250), fade=(430, 660), scale=0.83, side="left",
             text=dict(x=96, y=212, lines=["CRAFTED TO IMPRESS"], size=27, gap=0, rule_y=268)),
     s3=dict(bowl=dict(cx=680, cy=232, w=640), pot=dict(cx=680, cy=226, w=600)),
     s4=dict(dish=dict(cx=390, cy=232, w=530), bowl=dict(cx=390, cy=232, w=520),
@@ -349,8 +360,9 @@ DESKTOP = dict(
 MOBILE = dict(
     name="mobile", W=1080, H=1920, file="GD_Tableware_RS3000_Mobile_1080x1920.mp4",
     poster="GD_Tableware_RS3000_Mobile_Poster.jpg", poster_t=15.2, grain=0.014,
+    maxrate="20M", bufsize="40M",
     s1=dict(cx=540, cy=900, w=880),
-    s2=dict(panel=(540, 720), fade=(1180, 1330), scale=2.05, side="bottom",
+    s2=dict(panel=(540, 720), fade=(1180, 1330), scale=0.83, side="bottom", focus="center",
             text=dict(x=540, y=1400, lines=["CRAFTED", "TO IMPRESS"], size=58, gap=92, rule_y=1600)),
     s3=dict(bowl=dict(cx=540, cy=880, w=940), pot=dict(cx=540, cy=870, w=860)),
     s4=dict(dish=dict(cx=540, cy=820, w=940), bowl=dict(cx=540, cy=830, w=920),
@@ -407,11 +419,11 @@ def two_line_block(c, V, block, t, t_in, t_out, font=SANS_L, tracking=0.34, colo
     for i, line in enumerate(block["lines"]):
         r = ease_out(ramp(t, t_in + 0.12 * i, t_in + 0.12 * i + 0.7))
         draw_text(c, line, font, block["size"], block["x"], block["y"] + i * block["gap"], tracking=tracking,
-                  anchor=anchor, color=color, opacity=op, reveal=r, dy=10 * (1 - ease_out(ramp(t, t_in, t_in + 0.8))))
+                  anchor=anchor, color=color, opacity=op, reveal=r, dy=px(10) * (1 - ease_out(ramp(t, t_in, t_in + 0.8))))
     # signature red accent rule
-    L = (60 if V["name"] == "desktop" else 120) * ease_out(ramp(t, t_in + 0.35, t_in + 0.95))
+    L = px(60 if V["name"] == "desktop" else 120) * ease_out(ramp(t, t_in + 0.35, t_in + 0.95))
     rx = block["x"] if anchor == "c" else block["x"] + L / 2
-    draw_rule(c, rx, block["rule_y"], L, 2 if V["name"] == "desktop" else 4, RED, opacity=op, glow=0.25 * op)
+    draw_rule(c, rx, block["rule_y"], L, px(2 if V["name"] == "desktop" else 4), RED, opacity=op, glow=0.25 * op)
 
 
 def scene2(V, t):
@@ -420,6 +432,8 @@ def scene2(V, t):
     i = min(2, int(t - TL.S2[0]))
     lt = t - TL.MACRO_CUTS[i]
     key, focus, smul, drift, ang = MACROS[i]
+    if p.get("focus") == "center":  # source too small for a true macro at this size
+        focus = (asset(key).w / 2, asset(key).h / 2)
     c = background(V, t, (0, 0), (1, 1), 0)
     scale = p["scale"] * smul * (1 + 0.045 * lt)
     sw = (-0.4 + 1.8 * ease_io(ramp(lt, 0.0, 1.0)), ang, 0.09, 0.22)
@@ -435,7 +449,7 @@ def scene2(V, t):
         y = np.arange(H, dtype=np.float32)
         g = 1 - np.clip((y - a0) / (a1 - a0), 0, 1) ** 0.8
         c *= g[:, None, None]
-        top = np.clip(y / 200, 0, 1) ** 0.7
+        top = np.clip(y / px(200), 0, 1) ** 0.7
         c *= top[:, None, None]
     c += BLACK * (1 - g[None, :, None] if p["side"] == "left" else 1 - g[:, None, None])
     two_line_block(c, V, p["text"], t, 3.35, 5.95)
@@ -448,7 +462,7 @@ def scene3(V, t):
         lt = t - TL.S3[0]
         q = p["bowl"]
         drift = -18 * ease_io(lt / 1.5) * (V["W"] / 1300)
-        c = background(V, t, (q["cx"] + 30 * ease_io(lt / 1.5), q["cy"]), (q["w"] * 0.7, q["w"] * 0.45), 0.55)
+        c = background(V, t, (q["cx"] + px(30) * ease_io(lt / 1.5), q["cy"]), (q["w"] * 0.7, q["w"] * 0.45), 0.55)
         sw = (-0.3 + 1.0 * ease_io(lt / 1.5), 25, 0.07, 0.45)
         draw_product(c, "bowl_black", q["cx"] + drift, q["cy"], q["w"] * (1 + 0.04 * lt / 1.5), expo=1.05,
                      light=(0.5, -0.85), ambient=0.3, contrast=1.3, sweep=sw, rim=0.55,
@@ -457,7 +471,7 @@ def scene3(V, t):
         lt = t - TL.MATCH_CUT
         q = p["pot"]
         drift = 18 * ease_io(lt / 1.5) * (V["W"] / 1300)
-        c = background(V, t, (q["cx"] - 30 * ease_io(lt / 1.5), q["cy"]), (q["w"] * 0.7, q["w"] * 0.45), 0.55)
+        c = background(V, t, (q["cx"] - px(30) * ease_io(lt / 1.5), q["cy"]), (q["w"] * 0.7, q["w"] * 0.45), 0.55)
         # the light band continues across the match cut
         sw = (0.7 + 0.9 * ease_io(lt / 1.5), 25, 0.07, 0.45)
         expo = 1.1 * (1 - 0.6 * smooth(ramp(lt, 1.3, 1.5)))
@@ -474,7 +488,7 @@ def scene4(V, t):
         q = p["dish"]
         c = background(V, t, (q["cx"], q["cy"]), (q["w"] * 0.6, q["w"] * 0.4), 0.35)
         sw = (-0.3 + 1.6 * ease_io(lt / 1.5), 35, 0.08, 0.18)
-        draw_product(c, "dish_white", q["cx"] + 14 * ease_io(lt / 1.5), q["cy"], q["w"] * (1 + 0.045 * lt / 1.5),
+        draw_product(c, "dish_white", q["cx"] + px(14) * ease_io(lt / 1.5), q["cy"], q["w"] * (1 + 0.045 * lt / 1.5),
                      expo=0.84 + 0.05 * smooth(ramp(lt, 0, 0.4)), light=(-0.6, -0.8), ambient=0.6, contrast=0.95,
                      sweep=sw, rim=0.15, reflect=0.12, floor_glow=0.08)
     else:
@@ -483,7 +497,7 @@ def scene4(V, t):
         c = background(V, t, (q["cx"], q["cy"]), (q["w"] * 0.6, q["w"] * 0.4), 0.45)
         # narrow vertical strip-light reflection drifting across the bowl
         sw = (-0.1 + 1.2 * ease_io(lt / 1.5), 0, 0.03, 0.4)
-        draw_product(c, "bowl_two_tone", q["cx"] - 14 * ease_io(lt / 1.5), q["cy"], q["w"] * (1 + 0.04 * lt / 1.5),
+        draw_product(c, "bowl_two_tone", q["cx"] - px(14) * ease_io(lt / 1.5), q["cy"], q["w"] * (1 + 0.04 * lt / 1.5),
                      expo=0.92, light=(0.6, -0.8), ambient=0.6, contrast=0.95, sweep=sw, rim=0.3,
                      reflect=0.13, floor_glow=0.08)
     two_line_block(c, V, p["text"], t, 9.45, 11.95)
@@ -512,27 +526,27 @@ def scene5(V, t):
             sw = (-0.4 + 1.8 * ease_io(ramp(t, tb, tb + 2.2)), 20, 0.07, 0.3)
         draw_product(c, key, X, Y, w * z, expo=expo, light=(-0.4, -0.9), ambient=0.33, contrast=1.25,
                      sweep=sw, rim=0.45 * on * end_fade, reflect=(0.12 if depth >= 1.5 else 0.0) * end_fade,
-                     blur=0.5 if depth == 0 else 0.0, floor_glow=0.06 * expo if depth >= 1.5 else 0.0)
+                     blur=px(0.5) if depth == 0 else 0.0, floor_glow=0.06 * expo if depth >= 1.5 else 0.0)
     tx = p["text"]
     anchor = "c" if V["name"] == "mobile" else "l"
     # RS 3000 COLLECTION
     op1 = fade_window(t, 14.05, 15.55, 0.5, 0.3)
     r1 = ease_out(ramp(t, 14.05, 14.75))
     draw_text(c, "RS 3000", SANS_L, tx["title"], tx["x"], tx["title_y"], tracking=0.12, anchor=anchor,
-              opacity=op1, reveal=r1, dy=10 * (1 - r1))
+              opacity=op1, reveal=r1, dy=px(10) * (1 - r1))
     r1b = ease_out(ramp(t, 14.3, 15.0))
     draw_text(c, "COLLECTION", SANS_L, tx["sub"], tx["x"], tx["sub_y"], tracking=0.62, anchor=anchor,
               opacity=op1, reveal=r1b)
-    rl = (70 if anchor == "l" else 140) * ease_out(ramp(t, 14.4, 15.0))
+    rl = px(70 if anchor == "l" else 140) * ease_out(ramp(t, 14.4, 15.0))
     rule_y = tx["sub_y"] + tx["sub"] * 2.2
-    draw_rule(c, tx["x"] + (rl / 2 if anchor == "l" else 0), rule_y, rl, 2 if anchor == "l" else 4, RED,
+    draw_rule(c, tx["x"] + (rl / 2 if anchor == "l" else 0), rule_y, rl, px(2 if anchor == "l" else 4), RED,
               opacity=op1, glow=0.25 * op1)
     # THE ART OF THE TABLE
     op2 = fade_window(t, 15.6, 16.95, 0.45, 0.3)
     for i, line in enumerate(["THE ART OF", "THE TABLE"]):
         r = ease_out(ramp(t, 15.6 + 0.15 * i, 16.25 + 0.15 * i))
         draw_text(c, line, SERIF, tx["art"], tx["x"], tx["art_y"][i], tracking=0.16, anchor=anchor,
-                  opacity=op2, reveal=r, dy=8 * (1 - r))
+                  opacity=op2, reveal=r, dy=px(8) * (1 - r))
     return c
 
 
@@ -546,13 +560,13 @@ def scene6(V, t, logo_path):
     card = logo_card(logo_path, p["logo_h"])
     ch, cw = card.shape[:2]
     rl = cw * 1.25 * ease_out(ramp(lt, 0.0, 0.7))
-    draw_rule(c, cx, p["rule_y"], rl, 2 if V["name"] == "desktop" else 4, RED, opacity=1.0,
+    draw_rule(c, cx, p["rule_y"], rl, px(2 if V["name"] == "desktop" else 4), RED, opacity=1.0,
               glow=0.6 * (1 - 0.6 * ramp(lt, 0.7, 1.6)))
     # logo card
     op = smooth(ramp(lt, 0.3, 1.0))
     if op > 0:
         s = 0.97 + 0.03 * ease_out(ramp(lt, 0.3, 1.3))
-        k = cv2.resize(card, (round(cw * s), round(ch * s)), interpolation=cv2.INTER_AREA) if s < 1 else card
+        k = logo_card(logo_path, p["logo_h"] * s)
         kh, kw = k.shape[:2]
         draw_glow(c, cx, p["card_cy"], kw * 0.75, kh * 0.75, 0.10 * op, WHITE)
         # one subtle red sweep across the card on the musical hit
@@ -563,10 +577,10 @@ def scene6(V, t, logo_path):
                       0.10 * math.sin(math.pi * hit), RED)
     r = ease_out(ramp(lt, 1.0, 1.6))
     draw_text(c, "GD TABLEWARE INDUSTRY", SANS_M, p["title"], cx, p["title_y"], tracking=0.42, anchor="c",
-              opacity=smooth(ramp(lt, 1.0, 1.5)), reveal=r, dy=8 * (1 - r))
+              opacity=smooth(ramp(lt, 1.0, 1.5)), reveal=r, dy=px(8) * (1 - r))
     r2 = ease_out(ramp(lt, 1.5, 2.2))
     draw_text(c, "WHERE ELEGANCE TAKES SHAPE", SERIF, p["tag"], cx, p["tag_y"], tracking=0.16, anchor="c",
-              opacity=smooth(ramp(lt, 1.5, 2.0)), reveal=r2, dy=8 * (1 - r2))
+              opacity=smooth(ramp(lt, 1.5, 2.0)), reveal=r2, dy=px(8) * (1 - r2))
     return c
 
 
@@ -594,7 +608,42 @@ def post(V, c, frame_idx):
     g = rng.standard_normal((H, W), dtype=np.float32) * V["grain"]
     c = c + g[..., None] * (0.35 + 0.65 * np.sqrt(np.clip(c, 0, 1)))
     c = np.maximum(c, BLACK * 0.6)
-    return np.clip(c * 255 + rng.random((H, W, 1), dtype=np.float32) - 0.5, 0, 255).astype(np.uint8)
+    # triangular (TPDF) dither against banding in the black gradients
+    d = rng.random((H, W, 1), dtype=np.float32) - rng.random((H, W, 1), dtype=np.float32)
+    return np.clip(c * 255 + d + 0.5, 0, 255).astype(np.uint8)
+
+
+LAYOUT_KEYS_NOT_PX = {"name", "file", "poster", "poster_t", "grain", "side", "lines", "focus"}
+
+
+def internal(V):
+    """Layout scaled to the supersampled internal canvas (SS x every pixel value)."""
+    key = ("_ss", V["name"])
+    if key in POST:
+        return POST[key]
+
+    def sc(k, v):
+        if k in LAYOUT_KEYS_NOT_PX or isinstance(v, str):
+            return v
+        if k == "pieces":  # (key, x, y, width, depth, beat) - depth/beat are not pixels
+            return [(q[0], q[1] * SS, q[2] * SS, q[3] * SS, q[4], q[5]) for q in v]
+        if isinstance(v, dict):
+            return {kk: sc(kk, vv) for kk, vv in v.items()}
+        if isinstance(v, (list, tuple)):
+            return type(v)(sc(k, x) for x in v)
+        if isinstance(v, (int, float)):
+            return v * SS
+        return v
+
+    POST[key] = {k: sc(k, v) for k, v in V.items()}
+    return POST[key]
+
+
+def frame_image(V, t, frame_idx, logo_path):
+    """Render at SS x, Lanczos-downscale to delivery size, then finish at final res."""
+    c = render_frame(internal(V), t, logo_path)
+    c = cv2.resize(c, (V["W"], V["H"]), interpolation=cv2.INTER_LANCZOS4)
+    return post(V, c, frame_idx)
 
 
 def render_frame(V, t, logo_path):
@@ -624,7 +673,7 @@ def _init(vname, logo):
 def _work(i):
     V = _W["V"]
     t = i / FPS
-    return post(V, render_frame(V, t, _W["logo"]), i).tobytes()
+    return frame_image(V, t, i, _W["logo"]).tobytes()
 
 
 def main():
@@ -634,7 +683,7 @@ def main():
     ap.add_argument("--logo", default=str(DEFAULT_LOGO))
     ap.add_argument("--audio", default=str(BUILD / "soundtrack.wav"))
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--crf", type=int, default=20)
+    ap.add_argument("--crf", type=int, default=15)
     ap.add_argument("--preview-width", type=int, default=960, help="downsize stills for review")
     args = ap.parse_args()
     V = DESKTOP if args.version == "desktop" else MOBILE
@@ -646,11 +695,12 @@ def main():
         for s in args.stills.split(","):
             t = float(s)
             i = int(round(t * FPS))
-            img = Image.fromarray(post(V, render_frame(V, t, args.logo), i))
+            img = Image.fromarray(frame_image(V, t, i, args.logo))
             if args.preview_width and img.width > args.preview_width:
                 img = img.resize((args.preview_width, round(img.height * args.preview_width / img.width)), Image.LANCZOS)
-            out = BUILD / f"still_{V['name']}_{t:05.2f}.jpg"
-            img.save(out, quality=88)
+            full = not args.preview_width or img.width <= args.preview_width
+            out = BUILD / f"still_{V['name']}_{t:05.2f}{'_full.png' if full else '.jpg'}"
+            img.save(out) if full else img.save(out, quality=88)
             print(out, flush=True)
         return
 
@@ -659,6 +709,7 @@ def main():
            "-s", f"{V['W']}x{V['H']}", "-r", str(FPS), "-i", "-",
            "-i", args.audio, "-map", "0:v", "-map", "1:a",
            "-c:v", "libx264", "-preset", "slow", "-crf", str(args.crf), "-tune", "film",
+           "-maxrate", V["maxrate"], "-bufsize", V["bufsize"], "-x264-params", "aq-mode=3",
            "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p", "-g", str(FPS * 2),
            "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
            "-movflags", "+faststart", "-t", f"{DURATION:.3f}", str(out)]
@@ -674,7 +725,7 @@ def main():
     # poster
     _init(args.version, args.logo)
     i = int(round(V["poster_t"] * FPS))
-    img = post(V, render_frame(V, V["poster_t"], args.logo), i)
+    img = frame_image(V, V["poster_t"], i, args.logo)
     Image.fromarray(img).save(OUTPUT / V["poster"], quality=90, optimize=True, progressive=True)
     print("wrote", out)
 
