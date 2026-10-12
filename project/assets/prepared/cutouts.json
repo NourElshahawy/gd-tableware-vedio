@@ -1,0 +1,119 @@
+{
+  "pot_black": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.32 PM.jpeg",
+    "crop": [
+      184,
+      0,
+      1484,
+      866
+    ],
+    "size": [
+      1300,
+      866
+    ]
+  },
+  "bowl_black": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.32 PM (1).jpeg",
+    "crop": [
+      134,
+      17,
+      1475,
+      804
+    ],
+    "size": [
+      1341,
+      787
+    ]
+  },
+  "bowl_two_tone": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.32 PM (2).jpeg",
+    "crop": [
+      247,
+      21,
+      1473,
+      750
+    ],
+    "size": [
+      1226,
+      729
+    ]
+  },
+  "dish_white": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.32 PM (3).jpeg",
+    "crop": [
+      238,
+      20,
+      1497,
+      755
+    ],
+    "size": [
+      1259,
+      735
+    ]
+  },
+  "collection_full": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.31 PM.jpeg",
+    "crop": [
+      12,
+      9,
+      1584,
+      923
+    ],
+    "size": [
+      1572,
+      914
+    ]
+  },
+  "plate_marble_lg": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.31 PM (2).jpeg",
+    "crop": [
+      112,
+      110,
+      1424,
+      967
+    ],
+    "size": [
+      1312,
+      857
+    ]
+  },
+  "plate_marble_md": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.31 PM (1).jpeg",
+    "crop": [
+      143,
+      132,
+      1398,
+      933
+    ],
+    "size": [
+      1255,
+      801
+    ]
+  },
+  "plate_marble_sm": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.31 PM (3).jpeg",
+    "crop": [
+      227,
+      159,
+      1314,
+      936
+    ],
+    "size": [
+      1087,
+      777
+    ]
+  },
+  "tray_marble_rect": {
+    "source": "WhatsApp Image 2026-10-12 at 4.03.31 PM (4).jpeg",
+    "crop": [
+      118,
+      28,
+      1393,
+      1009
+    ],
+    "size": [
+      1275,
+      981
+    ]
+  }
+}

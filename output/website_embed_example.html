@@ -1,0 +1,62 @@
+<!doctype html>
+<!--
+  GD Tableware RS 3000 hero video - drop-in example (not wired into any site).
+  - Desktop (>= 768px): 1300x500 banner.  Mobile (< 768px): 1080x1920 portrait.
+  - Muted + playsinline + autoplay + loop = allowed to autoplay on all major browsers.
+  - prefers-reduced-motion: the video is never started; the poster still is shown.
+  Adjust file paths to wherever the site serves the media.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GD Tableware - RS 3000</title>
+<style>
+  .gd-hero { position: relative; width: 100%; background: #080808; overflow: hidden; }
+  /* Desktop: native 2.6:1 banner */
+  .gd-hero { aspect-ratio: 1300 / 500; }
+  .gd-hero video, .gd-hero img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  /* Mobile: full portrait 9:16 ... */
+  @media (max-width: 767px) {
+    .gd-hero { aspect-ratio: 9 / 16; max-height: 100svh; }
+    /* ...or, for a shorter mobile hero (e.g. 4:5), keep the centre band.
+       All mobile text/logo sits inside the central 1080x1350 safe area. */
+    .gd-hero--short { aspect-ratio: 4 / 5; }
+    .gd-hero video, .gd-hero img { object-position: 50% 45%; }
+  }
+</style>
+</head>
+<body>
+<section class="gd-hero" aria-label="GD Tableware Industry - RS 3000 Collection">
+  <picture>
+    <source media="(max-width: 767px)" srcset="GD_Tableware_RS3000_Mobile_Poster.jpg">
+    <img src="GD_Tableware_RS3000_Desktop_Poster.jpg" alt="RS 3000 collection by GD Tableware Industry" fetchpriority="high">
+  </picture>
+  <video id="gd-hero-video" muted playsinline loop preload="metadata" aria-hidden="true"
+         data-desktop="GD_Tableware_RS3000_Desktop_1300x500.mp4"
+         data-mobile="GD_Tableware_RS3000_Mobile_1080x1920.mp4"></video>
+</section>
+<script>
+(function () {
+  var v = document.getElementById('gd-hero-video');
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+  var mobile = window.matchMedia('(max-width: 767px)');
+  function load() {
+    if (reduce.matches) { v.pause(); v.removeAttribute('src'); v.load(); v.hidden = true; return; }
+    var src = mobile.matches ? v.dataset.mobile : v.dataset.desktop;
+    if (v.getAttribute('src') !== src) {
+      v.hidden = false;
+      v.poster = mobile.matches ? 'GD_Tableware_RS3000_Mobile_Poster.jpg' : 'GD_Tableware_RS3000_Desktop_Poster.jpg';
+      v.src = src;
+      v.muted = true;
+      var p = v.play();
+      if (p && p.catch) p.catch(function () { /* autoplay blocked: poster stays visible */ });
+    }
+  }
+  load();
+  (mobile.addEventListener ? mobile.addEventListener('change', load) : mobile.addListener(load));
+  (reduce.addEventListener ? reduce.addEventListener('change', load) : reduce.addListener(load));
+})();
+</script>
+</body>
+</html>
